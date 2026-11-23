@@ -6,7 +6,7 @@ const os = require('os');
 const crypto = require('crypto');
 const QRCode = require('qrcode');
 const XLSX = require('xlsx');
-const { createClient } = require('@supabase/supabase-js');
+const { MongoClient } = require('mongodb');
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -14,9 +14,9 @@ const DATA_DIR = path.join(__dirname, 'data');
 const DATA_FILE = path.join(DATA_DIR, 'attendance.json');
 const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
 const onVercel = process.env.VERCEL === '1';
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const supabase = supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabaseKey, { auth: { autoRefreshToken: false, persistSession: false } }) : null;
+const mongoUri = process.env.MONGODB_URI;
+const mongoClient = mongoUri ? new MongoClient(mongoUri, { serverSelectionTimeoutMS: 10000 }) : null;
+let mongoCollectionPromise;
 
 if (!onVercel) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -27,43 +27,53 @@ if (!onVercel) {
 const defaultSettings = () => ({ course: '', className: '', term: 'Ca 1 — 7h30–9h15', qrToken: crypto.randomBytes(24).toString('hex') });
 const readJson = (file, fallback) => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; } };
 const writeJson = (file, data) => fs.writeFileSync(file, JSON.stringify(data, null, 2), 'utf8');
-const requireStorage = () => { if (onVercel && !supabase) throw new Error('Chưa cấu hình cơ sở dữ liệu Supabase. Hãy thêm SUPABASE_URL và SUPABASE_SERVICE_ROLE_KEY trong Vercel.'); };
-const getRows = async () => {
+const requireStorage = () => { if (onVercel && !mongoClient) throw new Error('Chưa cấu hình MongoDB. Hãy thêm MONGODB_URI trong Vercel.'); };
+const getCollection = async () => {
   requireStorage();
-  if (!supabase) return readJson(DATA_FILE, []);
-  const { data, error } = await supabase.from('attendance').select('record').order('attendance_date', { ascending: false }).order('attendance_time', { ascending: false });
-  if (error) throw error;
-  return (data || []).map(row => row.record);
+  if (!mongoClient) return null;
+  if (!mongoCollectionPromise) mongoCollectionPromise = (async () => {
+    await mongoClient.connect();
+    const database = mongoClient.db(process.env.MONGODB_DB || 'diem_danh');
+    if (!await database.listCollections({ name: 'diem_danh' }, { nameOnly: true }).hasNext()) await database.createCollection('diem_danh');
+    const collection = database.collection('diem_danh');
+    await collection.createIndexes([
+      { key: { deviceId: 1 }, name: 'one_attendance_per_device', unique: true, partialFilterExpression: { type: 'attendance' } },
+      { key: { studentKey: 1, term: 1, date: 1 }, name: 'one_student_per_term_per_day', unique: true, partialFilterExpression: { type: 'attendance' } }
+    ]);
+    return collection;
+  })();
+  return mongoCollectionPromise;
+};
+const getRows = async () => {
+  const collection = await getCollection();
+  if (!collection) return readJson(DATA_FILE, []);
+  return (await collection.find({ type: 'attendance' }).sort({ date: -1, time: -1 }).toArray()).map(row => row.record);
 };
 const addRow = async record => {
-  requireStorage();
-  if (!supabase) { const rows = readJson(DATA_FILE, []); rows.push(record); writeJson(DATA_FILE, rows); return; }
-  const { error } = await supabase.from('attendance').insert({ id: record.id, device_id: record.deviceId, student_key: record.studentId.toLocaleLowerCase('vi'), term: record.term, attendance_date: record.date, attendance_time: record.time, record });
-  if (error) throw error;
+  const collection = await getCollection();
+  if (!collection) { const rows = readJson(DATA_FILE, []); rows.push(record); writeJson(DATA_FILE, rows); return; }
+  await collection.insertOne({ _id: record.id, type: 'attendance', deviceId: record.deviceId, studentKey: record.studentId.toLocaleLowerCase('vi'), term: record.term, date: record.date, time: record.time, record });
 };
 const deleteRow = async id => {
-  requireStorage();
-  if (!supabase) { const rows = readJson(DATA_FILE, []); const next = rows.filter(row => row.id !== id); if (rows.length === next.length) return false; writeJson(DATA_FILE, next); return true; }
-  const { data, error } = await supabase.from('attendance').delete().eq('id', id).select('id');
-  if (error) throw error;
-  return !!data?.length;
+  const collection = await getCollection();
+  if (!collection) { const rows = readJson(DATA_FILE, []); const next = rows.filter(row => row.id !== id); if (rows.length === next.length) return false; writeJson(DATA_FILE, next); return true; }
+  const result = await collection.deleteOne({ _id: id, type: 'attendance' });
+  return result.deletedCount > 0;
 };
 const getSettings = async () => {
-  requireStorage();
-  if (!supabase) return readJson(SETTINGS_FILE, defaultSettings());
-  const { data, error } = await supabase.from('app_state').select('value').eq('key', 'settings').maybeSingle();
-  if (error) throw error;
-  if (data?.value) return data.value;
+  const collection = await getCollection();
+  if (!collection) return readJson(SETTINGS_FILE, defaultSettings());
+  const existing = await collection.findOne({ _id: 'settings', type: 'settings' });
+  if (existing?.value) return existing.value;
   const initial = defaultSettings();
-  const { error: insertError } = await supabase.from('app_state').upsert({ key: 'settings', value: initial });
-  if (insertError) throw insertError;
-  return initial;
+  try { await collection.updateOne({ _id: 'settings' }, { $setOnInsert: { type: 'settings', value: initial } }, { upsert: true }); }
+  catch (error) { if (error.code !== 11000) throw error; }
+  return (await collection.findOne({ _id: 'settings', type: 'settings' }))?.value || initial;
 };
 const saveSettings = async settings => {
-  requireStorage();
-  if (!supabase) { writeJson(SETTINGS_FILE, settings); return; }
-  const { error } = await supabase.from('app_state').upsert({ key: 'settings', value: settings });
-  if (error) throw error;
+  const collection = await getCollection();
+  if (!collection) { writeJson(SETTINGS_FILE, settings); return; }
+  await collection.updateOne({ _id: 'settings' }, { $set: { type: 'settings', value: settings } }, { upsert: true });
 };
 const route = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 const adminOnly = (req, res, next) => req.session?.admin ? next() : res.status(401).json({ error: 'Vui lòng đăng nhập.' });
@@ -102,7 +112,7 @@ app.post('/api/attendance', route(async (req, res) => {
   if (rows.some(row => row.studentId.toLocaleLowerCase('vi') === String(studentId).trim().toLocaleLowerCase('vi') && row.term === term && row.date === today)) return res.status(409).json({ error: 'Mã sinh viên đã điểm danh ca này hôm nay.' });
   const now = new Date();
   const record = { id: crypto.randomUUID(), studentId: String(studentId).trim(), fullName: String(fullName).trim(), course: String(course).trim(), className: String(className).trim(), term: String(term), date: today, time: new Intl.DateTimeFormat('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(now), deviceId: String(deviceId), ip: clientIp(req) };
-  try { await addRow(record); } catch (error) { if (error.code === '23505') return res.status(409).json({ error: 'Thiết bị hoặc mã sinh viên đã điểm danh ca này hôm nay.' }); throw error; }
+  try { await addRow(record); } catch (error) { if (error.code === 11000) return res.status(409).json({ error: 'Thiết bị hoặc mã sinh viên đã điểm danh ca này hôm nay.' }); throw error; }
   res.status(201).json({ message: 'Điểm danh thành công!', record: { ...record, deviceId: undefined, ip: undefined } });
 }));
 
@@ -143,7 +153,7 @@ app.get('/api/admin/export', adminOnly, route(async (req, res) => {
 
 app.use((error, req, res, next) => {
   console.error(error);
-  const message = onVercel && !supabase ? error.message : 'Có lỗi máy chủ. Vui lòng kiểm tra cấu hình và nhật ký chạy.';
+  const message = onVercel && !mongoClient ? error.message : 'Có lỗi máy chủ. Vui lòng kiểm tra cấu hình và nhật ký chạy.';
   res.status(500).json({ error: message });
 });
 
