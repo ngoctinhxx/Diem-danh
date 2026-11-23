@@ -1,0 +1,13 @@
+{
+  "name": "diem-danh-sinh-vien",
+  "version": "1.0.0",
+  "description": "Ứng dụng điểm danh sinh viên bằng QR, lưu dữ liệu JSON cục bộ",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "dependencies": {
+    "express": "^4.21.2",
+    "express-session": "^1.18.1",
+    "qrcode": "^1.5.4",
+    "xlsx": "^0.18.5"
+  }
+}
