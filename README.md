@@ -9,7 +9,7 @@ npm install
 npm start
 ```
 
-Mở `http://localhost:3000`. Dữ liệu lưu trong `data/attendance.json` và `data/settings.json`.
+Mở `http://localhost:3000/` để hiển thị mã QR. Biểu mẫu nhập điểm danh nằm tại `http://localhost:3000/diemdanh`. Dữ liệu lưu trong `data/attendance.json` và `data/settings.json`.
 
 ## Triển khai lên Vercel
 

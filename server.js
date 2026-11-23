@@ -73,11 +73,24 @@ app.use(express.json({ limit: '100kb' }));
 app.set('trust proxy', 1);
 app.use(cookieSession({ name: 'attendance-session', keys: [process.env.SESSION_SECRET || 'diem-danh-local-change-this-secret'], httpOnly: true, sameSite: 'lax', secure: onVercel, maxAge: 8 * 60 * 60 * 1000 }));
 app.use(express.static(path.join(__dirname, 'public')));
+app.get('/diemdanh', (req, res) => res.sendFile(path.join(__dirname, 'public', 'diemdanh.html')));
+
+const createQrPayload = async req => {
+  const s = await getSettings();
+  const requestedHost = (req.get('host') || '').split(':')[0];
+  const localHost = ['localhost', '127.0.0.1', '::1'].includes(requestedHost);
+  const lanIp = localHost ? lanAddresses()[0] : null;
+  const host = lanIp ? `${lanIp}:${PORT}` : req.get('host');
+  const link = `${req.protocol}://${host}/diemdanh?token=${encodeURIComponent(s.qrToken)}`;
+  const dataUrl = await QRCode.toDataURL(link, { width: 320, margin: 2, color: { dark: '#172f2b', light: '#ffffff' } });
+  return { link, dataUrl };
+};
 
 app.get('/api/public-info', route(async (req, res) => {
   const s = await getSettings();
   res.json({ course: s.course, className: s.className, term: s.term, token: s.qrToken });
 }));
+app.get('/api/public/qr', route(async (req, res) => res.json(await createQrPayload(req))));
 app.post('/api/attendance', route(async (req, res) => {
   const { studentId, fullName, course, className, term, deviceId, token } = req.body || {};
   if (!studentId || !fullName || !course || !className || !term || !deviceId || !token) return res.status(400).json({ error: 'Vui lòng nhập đầy đủ thông tin và quét đúng mã QR.' });
@@ -118,16 +131,7 @@ app.put('/api/admin/settings', adminOnly, route(async (req, res) => {
 app.post('/api/admin/qr/refresh', adminOnly, route(async (req, res) => {
   const s = await getSettings(); s.qrToken = crypto.randomBytes(24).toString('hex'); await saveSettings(s); res.json({ ok: true, token: s.qrToken });
 }));
-app.get('/api/admin/qr', adminOnly, route(async (req, res) => {
-  const s = await getSettings();
-  const requestedHost = (req.get('host') || '').split(':')[0];
-  const localHost = ['localhost', '127.0.0.1', '::1'].includes(requestedHost);
-  const lanIp = localHost ? lanAddresses()[0] : null;
-  const host = lanIp ? `${lanIp}:${PORT}` : req.get('host');
-  const origin = `${req.protocol}://${host}`;
-  const link = `${origin}/?token=${encodeURIComponent(s.qrToken)}`;
-  res.json({ link, dataUrl: await QRCode.toDataURL(link, { width: 320, margin: 2, color: { dark: '#172f2b', light: '#ffffff' } }) });
-}));
+app.get('/api/admin/qr', adminOnly, route(async (req, res) => res.json(await createQrPayload(req))));
 app.get('/api/admin/export', adminOnly, route(async (req, res) => {
   const params = req.query; let rows = await getRows();
   const includes = (field, value) => !value || String(field || '').toLocaleLowerCase('vi').includes(String(value).toLocaleLowerCase('vi'));
